@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>3D 原位放大交互原型</title>
+    <style>
+        :root { --ios-spring: cubic-bezier(0.23, 1, 0.32, 1); }
+        body { margin: 0; background: #f0f2f5; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; font-family: "PingFang SC", sans-serif; }
+        
+        /* 舞台：点击此处可收起弹窗 */
+        #stage { 
+            position: relative; 
+            width: 1024px; height: 640px; 
+            background: #ffffff; 
+            border-radius: 40px; 
+            box-shadow: 0 40px 100px rgba(0,0,0,0.1); 
+            overflow: hidden; 
+        }
+
+        /* 3D 渲染容器：保持在中心 */
+        #scene-container { 
+            width: 100%; height: 100%; 
+            cursor: grab; 
+            display: flex; justify-content: center; align-items: center;
+        }
+        #scene-container:active { cursor: grabbing; }
+
+        /* 模型组：控制放大逻辑 */
+        #model-group { 
+            transition: transform 0.7s var(--ios-spring), opacity 0.5s; 
+            transform-origin: center; 
+        }
+
+        .face { fill: rgba(0,0,0,0.01); stroke: #ccc; stroke-width: 1; transition: all 0.3s; }
+        .face-active { fill: rgba(255, 77, 77, 0.05); stroke: #ff4d4d; stroke-width: 2.5; cursor: pointer; }
+        .face-active:hover { fill: rgba(255, 77, 77, 0.2); }
+
+        /* 右侧滑入弹窗 */
+        #card {
+            position: absolute;
+            top: 50%;
+            right: -550px; /* 初始隐藏 */
+            transform: translateY(-50%);
+            width: 480px;
+            background: white;
+            border-radius: 35px;
+            padding: 30px;
+            box-shadow: -20px 0 60px rgba(0,0,0,0.1);
+            transition: right 0.6s var(--ios-spring);
+            z-index: 100;
+        }
+        #card.active { right: 40px; }
+
+        /* 洗衣机 UI 细节 */
+        .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; }
+        .power-btn { width: 40px; height: 40px; border-radius: 50%; background: #8e8e93; color: white; display: flex; align-items: center; justify-content: center; cursor: pointer; border: none; }
+        
+        .btn-row { display: flex; gap: 15px; }
+        .btn { background: #f2f2f2; border-radius: 22px; padding: 22px; flex: 1; position: relative; }
+        .btn-white { background: white; border: 1px solid #eee; }
+        .btn-fold::after { content: ''; position: absolute; bottom: 0; right: 0; border-style: solid; border-width: 0 0 14px 14px; border-color: transparent transparent #d1d1d1 transparent; }
+        
+        .label { display: block; color: #333; font-size: 18px; font-weight: 600; }
+        .sub { display: block; color: #999; font-size: 14px; margin-top: 6px; }
+
+        .hint { position: absolute; bottom: 30px; left: 40px; color: #bbb; font-size: 14px; pointer-events: none; }
+    </style>
+</head>
+<body>
+
+<div id="stage" onclick="handleStageClick()">
+    <div class="hint">拖拽方块旋转 · 点击红框面原位放大</div>
+    
+    <div id="scene-container">
+        <svg width="600" height="600" id="svg-element">
+            <g id="model-group" transform="translate(300, 300)"></g>
+        </svg>
+    </div>
+
+    <!-- 右侧弹窗 -->
+    <div id="card" onclick="event.stopPropagation()">
+        <div class="card-header">
+            <b style="font-size: 26px; color: #1a1a1a;">洗衣机24601</b>
+            <button class="power-btn" onclick="closeDevice()">⏻</button>
+        </div>
+        <div class="btn-row">
+            <div class="btn btn-white btn-fold"><span class="label">上筒</span><span class="sub">洗涤</span></div>
+            <div class="btn btn-fold" style="flex: 1.8;"><span class="label">羊毛洗</span><span class="sub">预计50min</span></div>
+            <div class="btn btn-fold" style="text-align:center"><span style="font-size:24px">🔆</span><span class="sub">开始</span></div>
+        </div>
+    </div>
+</div>
+
+<script>
+    const group = document.getElementById('model-group');
+    const card = document.getElementById('card');
+    const stage = document.getElementById('stage');
+
+    // 1. 3D 立方体定义 (原位居中)
+    let nodes = [
+        [-100, -100, -100], [100, -100, -100], [100, 100, -100], [-100, 100, -100],
+        [-100, -100, 100], [100, -100, 100], [100, 100, 100], [-100, 100, 100]
+    ];
+    const faces = [
+        { indices: [4, 5, 6, 7], type: 'active' }, // 正面交互
+        { indices: [0, 1, 2, 3], type: 'plain' },
+        { indices: [0, 1, 5, 4], type: 'plain' },
+        { indices: [2, 3, 7, 6], type: 'plain' },
+        { indices: [0, 3, 7, 4], type: 'plain' },
+        { indices: [1, 2, 6, 5], type: 'plain' }
+    ];
+
+    let angleX = -0.4, angleY = 0.5, isMouseDown = false, lastX, lastY, isZoomed = false;
+
+    function rotate(node, ax, ay) {
+        let [x, y, z] = node;
+        let cosX = Math.cos(ax), sinX = Math.sin(ax);
+        let ny = y * cosX - z * sinX, nz = y * sinX + z * cosX;
+        y = ny; z = nz;
+        let cosY = Math.cos(ay), sinY = Math.sin(ay);
+        let nx = x * cosY + z * sinY; nz = -x * sinY + z * cosY;
+        return [nx, y, nz];
+    }
+
+    function render() {
+        if (isZoomed) return;
+        group.innerHTML = '';
+        const projected = nodes.map(n => rotate(n, angleX, angleY));
+        const sortedFaces = faces.map(f => {
+            const zSum = f.indices.reduce((sum, i) => sum + projected[i][2], 0);
+            return { ...f, z: zSum / 4 };
+        }).sort((a, b) => a.z - b.z);
+
+        sortedFaces.forEach(f => {
+            const points = f.indices.map(i => `${projected[i][0]},${projected[i][1]}`).join(' ');
+            const poly = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+            poly.setAttribute("points", points);
+            poly.setAttribute("class", f.type === 'active' ? 'face face-active' : 'face');
+            if (f.type === 'active') poly.onclick = (e) => { e.stopPropagation(); openDevice(); };
+            group.appendChild(poly);
+        });
+    }
+
+    // 鼠标拖拽旋转
+    stage.onmousedown = e => { if(isZoomed) return; isMouseDown = true; lastX = e.clientX; lastY = e.clientY; };
+    window.onmousemove = e => {
+        if (!isMouseDown || isZoomed) return;
+        angleY += (e.clientX - lastX) * 0.01;
+        angleX -= (e.clientY - lastY) * 0.01;
+        lastX = e.clientX; lastY = e.clientY;
+        render();
+    };
+    window.onmouseup = () => isMouseDown = false;
+
+    // 打开详情：原位放大
+    function openDevice() {
+        isZoomed = true;
+        // 关键：位置 translate(300, 300) 不变，只改变 scale
+        group.style.transform = "translate(300px, 300px) scale(2.4)"; 
+        group.style.opacity = "0.2";
+        card.classList.add('active');
+    }
+
+    // 关闭详情
+    function closeDevice() {
+        if (!isZoomed) return;
+        isZoomed = false;
+        group.style.transform = "translate(300px, 300px) scale(1)";
+        group.style.opacity = "1";
+        card.classList.remove('active');
+        // 延迟恢复渲染，确保过渡平滑
+        setTimeout(render, 50); 
+    }
+
+    // 处理背景点击收起
+    function handleStageClick() {
+        if (isZoomed) closeDevice();
+    }
+
+    render();
+</script>
+</body>
+</html>
